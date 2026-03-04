@@ -40,7 +40,7 @@ Why I haven't ported "postal" PsNee v8? Simply because JAP bios patching is bugg
 - Open LinkUtility and check if the tool sees the programmer.
 - Set the core (RISC-V) and the series (CH32V003).
 - Click on the folder icon (or press ALT+F1)
-- Select the BIN compiled files based on your console region (you can find the bin files in the [BIN]((https://github.com/carmax91/PsNee-CH32V003/tree/main/BIN)) folder).
+- Select the BIN compiled files based on your console region (you can find the bin files in the [BIN](https://github.com/Crx91/PsNee-CH32V003/tree/main/BIN%20(rev_3)) folder).
 - Connect the chip to the programmer.
 - Program the chip via Target -> Program (or press F10).
 ![done](https://github.com/carmax91/PsNee-CH32V003/blob/main/Imgs/LinU2.png)
