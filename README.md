@@ -1,7 +1,5 @@
 # PsNee-CH32V003
-Porting of PsNee to CH32V003
-
-**Warning**: Updated code is avaiable at [Rev_2](https://github.com/carmax91/PsNee-CH32V003/tree/Rev_2) branch!
+Porting of PsNee to CH32V003 rev_3
 
 PsNee v7 port to the ch32v003 MCU compatible  and stealth with all Ps1 motherboards!
 Plus this code virtually don't introduces any noise or degradation of the laser RF signal level because the it injects the SCEX string only when needed.
@@ -54,7 +52,11 @@ I've ported the code to the ch32fun platform wich is lighter faster and ages bet
 All in bare-metal and the difference is huge!!!!
 
 - The older arduino sketch used 10480 bytes (63%) of program storage space and used 588 bytes (28%) of dynamic memory. 
-- The newer ch32fun uses 1728 bytes (10.3%) of program storage space and only 8 bytes (0.4%) of dynamic memory!
+- The rev_1 based on ch32fun uses 1728 bytes (10.3%) of program storage space and only 8 bytes (0.4%) of dynamic memory!
+- The rev_2 has newer timing implementation made by the great @kalymos, code now is even smaller and no more ISR timing dipendent!
+  The newer ch32fun uses around 1500 bytes (8.4) of program storage space and only 4 bytes (0.2%) of dynamic memory!
+- The rev_3 has a newer board detection function with added 300ms stabilization delay to filter PU-7/20 power-up noise and sync with PU-22+ oscillating signals.
+  And on the Injection function has updated WFCK modulation for 7.3/14.6 kHz compatibility (Again thanks to @kalymos!)
 
 A very huge difference, because we don't have to carry anymore all the bloatware (super bugged) HAL of arduino ported libs! So now the code is way faster and efficient!
 
