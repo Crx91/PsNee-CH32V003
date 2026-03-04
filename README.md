@@ -1,7 +1,7 @@
 # PsNee-CH32V003
 Porting of PsNee to CH32V003
 
-**Warning**: Updated code is avaiable at [Rev_2](https://github.com/carmax91/PsNee-CH32V003/tree/Rev_2) branch!
+**Warning**: Updated code is avaiable at [Rev_3](https://github.com/Crx91/PsNee-CH32V003) branch!
 
 PsNee v7 port to the ch32v003 MCU compatible  and stealth with all Ps1 motherboards!
 Plus this code virtually don't introduces any noise or degradation of the laser RF signal level because the it injects the SCEX string only when needed.
