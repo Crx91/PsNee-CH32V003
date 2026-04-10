@@ -3,7 +3,7 @@
 
 #define SYSCLK_FREQ_48MHZ_HSI 48000000
 // PsNee
-// Porting CH32V003 by Carmax91 rev3 (no timer) heavly based on kalymos PsNee_v7/v8 (https://github.com/kalymos/PsNee)
+// Porting CH32V003 by Carmax91 rev 3.1 heavly based on kalymos PsNee_v9 (https://github.com/kalymos/PsNee)
 //
 // Beware to use the PSX 3.5V / 3.3V power, *NOT* 5V! The installation pictures include an example.
 //
@@ -14,10 +14,12 @@
 // PAL PM-41 consoles BIOS patching is NOT supported.
 //
 // Changelog:
-// Rev1: First rev
-// Rev2: Newer timing implementation made by the great @kalymos, code now is even smaller and no more ISR timing dipendent!
-// Rev3: Newer board detection function with added 300ms stabilization delay to filter PU-7/20 power-up noise and sync with PU-22+ oscillating signals.
-//       On the Injection function updated WFCK modulation for 7.3/14.6 kHz compatibility
+// Rev1.0: First rev
+// Rev2.0: Newer timing implementation made by the great @kalymos, code now is even smaller and no more ISR timing dipendent!
+// Rev3.0: Newer board detection function with added 300ms stabilization delay to filter PU-7/20 power-up noise and sync with PU-22+ oscillating signals.
+//         On the Injection function updated WFCK modulation for 7.3/14.6 kHz compatibility.
+// Rev3.1: Refactor board detection function.
+//         Refactor WFCK modulation.
 //
 // PINOUT for wch ch32v003j4m6:
 /*
@@ -30,87 +32,98 @@
 
 */
 // DON'T forget to set the region of modchip via #define X_BIT ('e' for PAL, 'a' for USA, 'i' for JAP region) predirectives.
-
-/* Global define */
-//------REGION SELECT-------
+//------REGION SELECT---------
 #define X_Bit 'e' // PAL
-// #define X_Bit 'a' //USA
+// #define X_Bit 'a' // USA
 // #define X_Bit 'i' // JAP
 //----------------------------
+
+/* Global define */
+//The definitions below should be never touched!
 #define bits_delay 4000     // 250 bits/s (microseconds)
 #define injections_delay 90 // 72 in oldcrow. PU-22+ work best with 80 to 100 (milliseconds)
-#define HYSTERESIS_MAX 17
+#define HYSTERESIS_MAX 17  // The sweet spot is between 11~19. All models have bad behavior below 11, 
+                           // PU-41 can start to have bad behavior beyond 20, for fat models we can go up to 60
+                           // On fat models if your reader is really bad you can increase this value in steps of 5
 
 /* Global Variable */
-// Setup() detects which (of 2) injection methods this PSX board requires, then stores it in wfck_mode.
-uint8_t wfck_mode = 0;
+uint8_t wfck_mode = 0; //Flag initializing for automatic console generation selection 0 = old, 1 = pu-22 and above.
+uint8_t hysteresis = 0;
+uint8_t scbuf[12] = {0}; // SUBQ bit storage
+uint16_t timeout_clock_counter = 0;
+uint8_t bitbuf = 0;
+uint8_t bitpos = 0;
+uint8_t scpos = 0; // scbuf position
 
-/*----------------------------------------------------------------------
-  Function: board_detection
 
-  This function distinguishes motherboard generations by detecting
-  the nature of the WFCK signal:
+// *****************************************************************************
+// Function: board_detection
+// DESCRIPTION: 
+// Distinguishes motherboard generations (PU-7 through PU-22+) by analyzing 
+// the behavior of the WFCK signal.
+//
+// SIGNAL CHARACTERISTICS:
+// - Legacy Boards (PU-7 to PU-20): WFCK acts as a static GATE signal. 
+//   It remains HIGH (continuous) during the region-check window.
+// - Modern Boards (PU-22 or newer): WFCK is an oscillating clock signal 
+//   (Frequency-based).
+//  
+// WFCK: __-----------------------  // CONTINUOUS (PU-7 .. PU-20)(GATE)
+// 
+// WFCK: __-_-_-_-_-_-_-_-_-_-_-_-  // FREQUENCY  (PU-22 or newer)
+// 
+// HISTORICAL CONTEXT:
+// Traditionally, WFCK was referred to as the "GATE" signal. On early models, 
+// modchips functioned as a synchronized gate, pulling the signal LOW 
+// precisely when the region-lock data was being processed.
+//  
+// FREQUENCY DATA:
+// - Initial/Protection Phase: ~7.3 kHz.
+// - Standard Data Reading: ~14.6 kHz.
+//
+// *****************************************************************************
 
-  WFCK: __-----------------------  // CONTINUOUS (PU-7 .. PU-20)(GATE)
-
-  WFCK: __-_-_-_-_-_-_-_-_-_-_-_-  // FREQUENCY  (PU-22 or newer)
-
-  Traditionally, the WFCK signal was called GATE. This is because, on early models,
-  modchips acted like a gate that would open to pull the signal down
-   at the exact moment the region code was being passed (which is still the case today).
-
-  During the initialization and region protection zone reading phases,
-  the WFCK clock frequency is approximately 7.3 kHz.
-  During normal data reading, the frequency shifts to 14.6 kHz.
-
------------------------------------------------------------------------*/
 void board_detection()
 {
-// Default to static signal (PU-7 to PU-20)
-  wfck_mode = 0;
+ wfck_mode = 0;           // Default: Legacy (GATE)
+ uint8_t pulse_hits = 25; // We need to see 25 oscillations to confirm FREQUENCY mode
+ uint16_t detectionWindow = 10000; 
+ Delay_Ms(300);          // Wait for WFCK to stabilize (High on Legacy, Oscillation on Modern)
 
-  /* 
-    INITIAL STABILIZATION DELAY (300ms)
-    PU-7 to PU-20: Voltage climbs slowly (up to 54ms) then stays HIGH (static).
-    PU-22+: Signal only starts oscillating (~7.3kHz) after approximately 297ms.
-    Waiting 300ms bypasses all power-up transients and initial noise.
-  */
-  Delay_Ms(300); 
-
-  // Sampling window to detect the oscillating signal
-  uint16_t detectionWindow = 10000; 
-  
   while (--detectionWindow) {
-    /* 
-       On older boards (PU-7/20), the signal is now a solid HIGH.
-       If we detect a LOW state, it's a potential oscillation from a newer board.
-    */
-    if (!(GPIOA->INDR >> (2 & 0xf) & 1)) { //Wfck == 0
-      // Small debounce delay to filter out micro-glitches or remaining noise
-      uint8_t debounce = 200;//100;
-      while (--debounce);
+    // LOGIC BASED ON YOUR ANALYSIS:
+    // If WFCK is "CONTINUOUS" (Legacy), it stays HIGH. PIN_WFCK_READ will always be 1.
+    // If WFCK is "FREQUENCY" (Modern), it will hit 0 (LOW) periodically.
+    
+     if (!(GPIOA->INDR >> (2 & 0xf) & 1)) { //Wfck == 0  //Detect a LOW state (only possible in FREQUENCY mode)
+      
+      pulse_hits--;        // Record one oscillation hit
 
-      /* 
-         VERIFICATION: If the signal is STILL low, it confirms a real 
-         clock cycle (WFCK). Older boards will never reach this state 
-         once stabilized at HIGH.
-      */
-      if (!(GPIOA->INDR >> (2 & 0xf) & 1)) { //Wfck == 0
-        wfck_mode = 1; // Target: PU-22 or newer
-        return;
+      if (pulse_hits == 0) {
+        wfck_mode = 1;     // Confirmed: FREQUENCY mode (PU-22 or newer)
+        return;            // Exit as soon as we are sure
+      }
+
+      //SYNC: Wait for the signal to go HIGH again.
+      //This ensures we count each pulse of the "FREQUENCY" signal only once.
+      
+      while (!(GPIOA->INDR >> (2 & 0xf) & 1) && detectionWindow > 0) {
+        detectionWindow--;
       }
     }
   }
+  // If the window expires without seeing enough LOW pulses, it remains wfck_mode = 0 (GATE)
 }
+
 
 // *****************************************************************************************
 // Function: inject_SCEX
-// Description:
+// DESCRIPTION:
 // Injects SCEX data corresponding to a given region ('e' for Europe, 'a' for America,
 // 'i' for Japan). This function is used for modulating the SCEX signal to bypass
 // region-locking mechanisms.
 //
-// Parameters:
+// PARAMETERS:
 // - region: A character ('e', 'a', or 'i') representing the target region.
 //
 // *****************************************************************************************
@@ -164,19 +177,19 @@ void inject_SCEX(const char region)
       if (currentBit == 0)
       {
         // For OLD boards, bit 0 is a forced LOW signal
-        // PC1 -> Data Output ---------------------------------------
+        // PC1 -> Data Output -------------------------
         GPIOC->CFGLR &= ~(0xf << (4 * 1));
         GPIOC->CFGLR |= (3 | 0) << (4 * 1);
-        //----------------------------------------------------------
+        //---------------------------------------------
         GPIOC->BSHR = (1 << 16 + 1); // PC1 -> Data Low
         Delay_Us(bits_delay);
       }
       else
       {
         // For OLD boards, bit 1 is High-Z (Pin set as input)
-        // PC1 <- Data Input -----------------------------------------------
+        // PC1 <- Data Input -----------------------------------------------------------------
         GPIOC->CFGLR = (GPIOC->CFGLR & (~(0xf << (4 * (1 & 0xf))))) | (4 << (4 * (1 & 0xf)));
-        //-----------------------------------------------------------------
+        //------------------------------------------------------------------------------------
         Delay_Us(bits_delay);
       }
     }
@@ -189,44 +202,41 @@ void inject_SCEX(const char region)
       if (currentBit == 0)
       {
         // For NEW boards, bit 0 is also a forced LOW signal
-        // PC1 -> Data Output ---------------------------------------
+        // PC1 -> Data Output ----------------------
         GPIOC->CFGLR &= ~(0xf << (4 * 1));
         GPIOC->CFGLR |= (3 | 0) << (4 * 1);
-        //----------------------------------------------------------
+        //------------------------------------------
         GPIOC->BSHR = (1 << 16 + 1); // PC1 Data Low
         Delay_Us(bits_delay);        // Wait for specified delay between bits
       }
       else
       {
        // For NEW boards, bit 1 must be modulated with the WFCK clock signal
-        /* 
+       /* 
        WFCK Modulation Loop: Syncs to 7.3kHz or 14.6kHz.
        Follows hardware edges to stay bit-perfect with the console.
        */
-       // PC1 -> Data Output ---------------------------------------
+       // PC1 -> Data Output ----------------------
        GPIOC->CFGLR &= ~(0xf << (4 * 1));
        GPIOC->CFGLR |= (3 | 0) << (4 * 1);
-       //----------------------------------------------------------
+       //------------------------------------------
        
-       uint8_t count = 30; 
-       
-       while (count--) {
+       for (uint8_t count = 30; count > 0; count--){
+             
+        while((GPIOA->INDR >> (2 & 0xf) & 1)); //Wait for Falling Edge  // While WfckRead == 1
+        GPIOC->BSHR = (1 << 16 + 1); //PC1 -> Data Low
       
-        while((GPIOA->INDR >> (2 & 0xf) & 1)); //Wait for Falling Edge  //WfckRead
-        GPIOC->BSHR = (1 << 16 + 1); // //PC1 -> Data Low
-      
-        while(!(GPIOA->INDR >> (2 & 0xf) & 1)); //Wait for Rising Edge //!WfckRead
-        GPIOC->BSHR = (1 << 1); // //PC1 -> Data High
-       
+        while(!(GPIOA->INDR >> (2 & 0xf) & 1)); //Wait for Rising Edge // While WfckRead == 0
+        GPIOC->BSHR = (1 << 1); //PC1 -> Data High
        }
       }
     }
   }
   // After injecting SCEX data, set DATA pin as output and clear (low)
-  // PC1 -> Data Output ---------------------------------------
+  // PC1 -> Data Output ----------------------
   GPIOC->CFGLR &= ~(0xf << (4 * 1));
   GPIOC->CFGLR |= (3 | 0) << (4 * 1);
-  //----------------------------------------------------------
+  //------------------------------------------
   GPIOC->BSHR = (1 << 16 + 1); // PC1 -> Data Low
   Delay_Ms(injections_delay);
 }
@@ -237,32 +247,23 @@ int main()
   // Enable GPIOs
   RCC->APB2PCENR |= RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOC | RCC_APB2Periph_GPIOD;
 
-  // PC1 <- Data Input -----------------------------------------------
-  // funPinMode(PC1, GPIO_CNF_IN_FLOATING);
+  // PC1 <- Data Input -----------------------------------------------------------------
   GPIOC->CFGLR = (GPIOC->CFGLR & (~(0xf << (4 * (1 & 0xf))))) | (4 << (4 * (1 & 0xf)));
-  //-----------------------------------------------------------------
-  // PA2 <- Wfck Input -----------------------------------------------
-  // funPinMode(PA2, GPIO_CNF_IN_FLOATING);
+  //------------------------------------------------------------------------------------
+  // PA2 <- Wfck Input -----------------------------------------------------------------
   GPIOA->CFGLR = (GPIOA->CFGLR & (~(0xf << (4 * (2 & 0xf))))) | (4 << (4 * (2 & 0xf)));
-  //-----------------------------------------------------------------
-  // PC4 <- Subq Input-----------------------------------------------
-  // funPinMode(PC4, GPIO_CNF_IN_FLOATING);
+  //------------------------------------------------------------------------------------
+  // PC4 <- Subq Input -----------------------------------------------------------------
   GPIOC->CFGLR = (GPIOC->CFGLR & (~(0xf << (4 * (4 & 0xf))))) | (4 << (4 * (4 & 0xf)));
-  //-----------------------------------------------------------------
-  // PC2 <- Sqck Input-------------------------------------------------
-  // funPinMode(PC2, GPIO_CNF_IN_FLOATING);
+  //------------------------------------------------------------------------------------
+  // PC2 <- Sqck Input -----------------------------------------------------------------
   GPIOC->CFGLR = (GPIOC->CFGLR & (~(0xf << (4 * (2 & 0xf))))) | (4 << (4 * (2 & 0xf)));
-  //------------------------------------------------------------------
-  // PD6 -> LED Output ------------------------------------------------
+  //------------------------------------------------------------------------------------
+  // PD6 -> LED Output ---------------
   GPIOD->CFGLR &= ~(0xF << (4 * 6));
   GPIOD->CFGLR |= (3 | 0) << (4 * 6);
-  //------------------------------------------------------------------
-  uint8_t hysteresis = 0;
-  uint8_t scbuf[12] = {0}; // SUBQ bit storage
-  uint16_t timeout_clock_counter = 0;
-  uint8_t bitbuf = 0;
-  uint8_t bitpos = 0;
-  uint8_t scpos = 0; // scbuf position
+  //----------------------------------
+
 
   GPIOD->BSHR = (1 << 6); // PD6 -> LED High  //Setup begin!:
 
@@ -320,14 +321,14 @@ int main()
 
     __enable_irq(); // End critical section
 
-    //************************************************************************
+    // *************************************************************************************************
     // Check if read head is in wobble area
     // We only want to unlock game discs (0x41) and only if the read head is in the outer TOC area.
     // We want to see a TOC sector repeatedly before injecting (helps with timing and marginal lasers).
     // All this logic is because we don't know if the HC-05 is actually processing a getSCEX() command.
     // Hysteresis is used because older drives exhibit more variation in read head positioning.
     // While the laser lens moves to correct for the error, they can pick up a few TOC sectors.
-    //************************************************************************
+    // **************************************************************************************************
 
     // This variable initialization macro is to replace (0x41) with a filter that will check that only the three most significant bits are correct. 0x001xxxxx
     uint8_t isDataSector = (((scbuf[0] & 0x40) == 0x40) && (((scbuf[0] & 0x10) == 0) && ((scbuf[0] & 0x80) == 0)));
@@ -353,12 +354,10 @@ int main()
       hysteresis--;
     }
 
-    // hysteresis value "optimized" using very worn but working drive on ATmega328 @ 16Mhz
+    // hysteresis value "optimized" using very worn but working drive
     // should be fine on other MCUs and speeds, as the PSX dictates SUBQ rate
     if (hysteresis >= HYSTERESIS_MAX)
     {
-      // If the read head is still here after injection, resending should be quick.
-      // Hysteresis naturally goes to 0 otherwise (the read head moved).
       hysteresis = 11;
 
       //************************************************************************
@@ -366,18 +365,18 @@ int main()
       //************************************************************************
       GPIOD->BSHR = (1 << 6); // PD6 -> LED High //Start Injection
 
-      // PC1 -> Data Output ---------------------------------------
+      // PC1 -> Data Output ----------------------
       GPIOC->CFGLR &= ~(0xf << (4 * 1));
       GPIOC->CFGLR |= (3 | 0) << (4 * 1);
-      //----------------------------------------------------------
+      //------------------------------------------
       GPIOC->BSHR = (1 << 16 + 1); // PC1 Data Low
 
-      if (!wfck_mode) // If wfck_mode is fals (oldmode)
+      if (!wfck_mode) // If wfck_mode is 0 (oldmode)
       {
-        // PA2 -> Wfck Output -----------------------------------------------
+        // PA2 -> Wfck Output ----------------------
         GPIOA->CFGLR &= ~(0xf << (4 * 2));
         GPIOA->CFGLR |= (3 | 0) << (4 * 2);
-        //-----------------------------------------------------------------
+        //------------------------------------------
         GPIOA->BSHR = (1 << 16 + 2); // PA2 Wfck Low
       }
       Delay_Ms(injections_delay); // HC-05 waits for a bit of silence (pin low) before it begins decoding.
@@ -392,17 +391,16 @@ int main()
 
       if (!wfck_mode)
       {
-        // PA2 <- Wfck Input ---------------------------------------------------
-        // funPinMode(PA2, GPIO_CNF_IN_FLOATING);
+        // PA2 <- Wfck Input -----------------------------------------------------------------
         GPIOA->CFGLR = (GPIOA->CFGLR & (~(0xf << (4 * (2 & 0xf))))) | (4 << (4 * (2 & 0xf)));
-        //----------------------------------------------------------------------
+        //------------------------------------------------------------------------------------
       }
-      // PC1 <- Data Input ----------------------------------------------------
-      // funPinMode(PC1, GPIO_CNF_IN_FLOATING);
+      // PC1 <- Data Input -----------------------------------------------------------------
       GPIOC->CFGLR = (GPIOC->CFGLR & (~(0xf << (4 * (1 & 0xf))))) | (4 << (4 * (1 & 0xf)));
-      //-----------------------------------------------------------------------
+      //------------------------------------------------------------------------------------
 
       GPIOD->BSHR = (1 << 16 + 6); // PD6 -> LED Low //Injection done!
     }
   }
 }
+
